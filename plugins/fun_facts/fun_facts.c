@@ -131,13 +131,14 @@ static double tile_pref_duration(void) { return 8.0; }
 
 //here's the thing we care about
 static Tile TILE = {
-    .api_version = TILE_API_VERSION,
+    .api_version = 4,
     .name = tile_name,
     .create = tile_create,
     .destroy = tile_destroy,
     .update = tile_update,
     .render = tile_render,
-    .preferred_duration = tile_pref_duration
+    .preferred_duration = tile_pref_duration,
+    .on_hide = NULL
 };
 
 //give the tile to the main thing

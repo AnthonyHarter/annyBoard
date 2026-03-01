@@ -97,6 +97,8 @@ static void tile_update(void *state, double dt) {
 }
 
 
+
+
 static void tile_render(void *state, SDL_Renderer *r, const SDL_Rect *rect) {
     State *s = (State*)state;
 
@@ -131,7 +133,8 @@ static Tile TILE = {
     .destroy = tile_destroy,
     .update = tile_update,
     .render = tile_render,
-    .preferred_duration = tile_pref_duration
+    .preferred_duration = tile_pref_duration,
+    .on_hide = NULL,
 };
 
 //give the tile to the main thing

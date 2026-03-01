@@ -131,7 +131,8 @@ static Tile TILE = {
     .destroy = tile_destroy,
     .update = tile_update,
     .render = tile_render,
-    .preferred_duration = tile_pref_duration
+    .preferred_duration = tile_pref_duration,
+    .on_hide = NULL,
 };
 
 //give the tile to the main thing

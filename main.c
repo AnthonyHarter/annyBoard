@@ -39,6 +39,7 @@
 #include <stdlib.h>          
 
 #include "tile_api.h"
+#include "media.h"
 
 //MODIFIABLE GLOBALS
 #define WINDOW_TITLE "Shineman 425"
@@ -105,6 +106,7 @@ typedef struct {
     int current; //index of active tile
     double t_in_tile; //seconds spent on current tile
     double global_duration; //fallback duration when a tile doesn't specify one
+    int frozen; //if 1, dont update, if 0, update
 } TileManager;
 
 
@@ -754,8 +756,8 @@ static void tile_manager_load_dir(TileManager *tm, const char *plugins_root, Til
             fprintf(stderr, "Tile name: %s | api_version=%d\n",
                     api[0].name ? api[0].name() : "(null)", api[0].api_version);
 
-            if (api[0].api_version != TILE_API_VERSION) {
-                fprintf(stderr, "API version mismatch for %s (plugin=%d host=%d)\n",
+            if (api[0].api_version > TILE_API_VERSION || api[0].api_version < 2) {
+                fprintf(stderr, "API version unsupported for %s (plugin=%d host=%d)\n",
                         full, api[0].api_version, TILE_API_VERSION);
                 dlclose(h);
                 continue;
@@ -795,22 +797,37 @@ static double tile_duration(const LoadedTile *lt, double global_duration) {
 }
 
 static void tile_manager_update(TileManager *tm, double dt) {
-    if (tm[0].count <= 0) return; //nothing to do if no tiles loaded
+    if (tm[0].count <= 0) return;
 
     LoadedTile *cur = &tm[0].tiles[tm[0].current];
 
-    //let the tile animate internally if it wants to
-    if (cur[0].api && cur[0].api[0].update) cur[0].api[0].update(cur[0].state, dt);
+    // update only if not frozen (you said frozen means don't update)
+    if (!tm[0].frozen) {
+        if (cur[0].api && cur[0].api[0].update && cur[0].state) {
+            cur[0].api[0].update(cur[0].state, dt);
+        }
 
-    //advance time and switch tile when its duration expires
-    tm[0].t_in_tile += dt;
-    double dur = tile_duration(cur, tm[0].global_duration);
+        tm[0].t_in_tile += dt;
+        double dur = tile_duration(cur, tm[0].global_duration);
 
-    if (tm[0].t_in_tile >= dur) {
-        tm[0].t_in_tile = 0.0;
-        tm[0].current = (tm[0].current + 1) % tm[0].count;
-        if (tm[0].tiles[tm[0].current].api[0].on_show)
-        tm[0].tiles[tm[0].current].api[0].on_show(tm[0].tiles[tm[0].current].state);
+        if (tm[0].t_in_tile >= dur) {
+            // *** NEW: tell current tile it's leaving ***
+            if (cur[0].api && cur[0].api[0].on_hide && cur[0].state) {
+                cur[0].api[0].on_hide(cur[0].state);
+            }
+
+            tm[0].t_in_tile = 0.0;
+            tm[0].current = (tm[0].current + 1) % tm[0].count;
+
+            LoadedTile *next = &tm[0].tiles[tm[0].current];
+
+            if (next[0].api && next[0].api[0].on_show && next[0].state) {
+                next[0].api[0].on_show(next[0].state);
+            }
+        }
+    } else {
+        // frozen: still allow render; no update / no timer advance
+        // (do nothing here)
     }
 }
 
@@ -824,6 +841,7 @@ static void tile_slot_render(TileSlot *s, SDL_Renderer *r, const SDL_Rect *rect)
     if (!s[0].plug) return;
     if (s[0].plug[0].api[0].render) s[0].plug[0].api[0].render(s[0].state, r, rect);
 }
+
 
 int main(int argc, char **argv) {
     (void)argc;
@@ -947,25 +965,50 @@ int main(int argc, char **argv) {
 
     //setup tile context (this is what plugins get)
     TileContext tctx;
-    memset(&tctx, 0, sizeof(tctx));
+    memset(&tctx, 0, sizeof(tctx)); //zero init
+
     tctx.renderer = r;
     tctx.screen_w = ww;
     tctx.screen_h = hh;
     tctx.font_small  = font_footer;
     tctx.font_medium = font_title;
 
+    MediaSystem *media = media_system_create(r);
+    tctx.media = media_system_api(media);
+    media_system_set_ctx(&tctx, media);
+
+    if (SDL_WasInit(SDL_INIT_AUDIO) == 0) {
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            fprintf(stderr, "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s\n", SDL_GetError());
+        }
+    }
+
     //we use 4 tile managers
     //this gives independence immediately without adding new loader APIs
     TileManager tm[4];
     for (int i = 0; i < 4; i++) {
-        tile_manager_init(&tm[i], 8.0);                //each corner cycles tiles
+        fprintf(stderr, "HOST: TileContext ptr=%p media=%p\n", (void*)&tctx, (void*)tctx.media);
+        tile_manager_init(&tm[i], 8.0); //each corner cycles tiles
         tile_manager_load_dir(&tm[i], "./plugins", &tctx); //load same plugin set into each manager
+
+        //if its frozen we dont
+        if (tm[i].frozen) continue;
 
         //if there are enough tiles, start each corner at a different index so you don't see duplicates
         //(this is a best-effort uniqueness without a full scheduler)
         if (tm[i].count > 0) {
-            tm[i].current = i % tm[i].count;
+            LoadedTile *old = &tm[i].tiles[tm[i].current];
+            if (old[0].api && old[0].api[0].on_hide && old[0].state) {
+                old[0].api[0].on_hide(old[0].state);
+            }
+
+            tm[i].current = (tm[i].current + 1) % tm[i].count;
             tm[i].t_in_tile = 0.0;
+
+            LoadedTile *nw = &tm[i].tiles[tm[i].current];
+            if (nw[0].api && nw[0].api[0].on_show && nw[0].state) {
+                nw[0].api[0].on_show(nw[0].state);
+            }
         }
     }
 
@@ -984,41 +1027,49 @@ int main(int argc, char **argv) {
         //handle events like quit, fullscreen toggle, reload dev helper
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = 0;
+            if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+            SDL_Keycode k = e.key.keysym.sym;
 
-            if (e.type == SDL_KEYDOWN) {
-                SDL_Keycode k = e.key.keysym.sym;
+            if (k == SDLK_ESCAPE) running = 0;
 
-                if (k == SDLK_ESCAPE) running = 0;
+            // Freeze/unfreeze per corner (toggle)
+            if (k == SDLK_1) tm[0].frozen = !tm[0].frozen;
+            if (k == SDLK_2) tm[1].frozen = !tm[1].frozen;
+            if (k == SDLK_3) tm[2].frozen = !tm[2].frozen;
+            if (k == SDLK_4) tm[3].frozen = !tm[3].frozen;
 
-                if (k == SDLK_f) {
-                    //Toggle borderless fullscreen (good for TV kiosk)
-                    Uint32 flags = SDL_GetWindowFlags(win);
-                    int is_fs = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
-                    SDL_SetWindowFullscreen(win, is_fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-                }
+            if (k == SDLK_f) {
+                //Toggle borderless fullscreen (good for TV kiosk)
+                Uint32 flags = SDL_GetWindowFlags(win);
+                int is_fs = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+                SDL_SetWindowFullscreen(win, is_fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+            }
 
-                if (k == SDLK_r) {
-                    //reload everything
-                    SDL_GetWindowSize(win, &ww, &hh);
-                    tctx.screen_w = ww;
-                    tctx.screen_h = hh;
+            if (k == SDLK_r) {
+                //reload everything
+                SDL_GetWindowSize(win, &ww, &hh);
+                tctx.screen_w = ww;
+                tctx.screen_h = hh;
 
-                    contributors_strip_load(&contribs, r, font_footer, "contributors.txt", ww);
+                contributors_strip_load(&contribs, r, font_footer, "contributors.txt", ww);
 
-                    //reload all 4 managers so new plugins appear without restarting
-                    for (int i = 0; i < 4; i++) {
-                        tile_manager_unload(&tm[i]);
-                        tile_manager_init(&tm[i], 8.0);
-                        tile_manager_load_dir(&tm[i], "./plugins", &tctx);
+                //reload all 4 managers so new plugins appear without restarting
+                for (int i = 0; i < 4; i++) {
+                    int was_frozen = tm[i].frozen;  // preserve freeze state across reload
 
-                        if (tm[i].count > 0) {
-                            tm[i].current = i % tm[i].count;
-                            tm[i].t_in_tile = 0.0;
-                        }
+                    tile_manager_unload(&tm[i]);
+                    tile_manager_init(&tm[i], 8.0);
+                    tm[i].frozen = was_frozen;
+
+                    tile_manager_load_dir(&tm[i], "./plugins", &tctx);
+
+                    if (tm[i].count > 0) {
+                        tm[i].current = i % tm[i].count;
+                        tm[i].t_in_tile = 0.0;
                     }
                 }
             }
+        }
         }
 
         //track window size so layout stays correct when resized
@@ -1080,20 +1131,27 @@ int main(int argc, char **argv) {
         SDL_Rect br = { pad_x + tile_w + gap_x, body_y + pad_y + tile_h + gap_y, tile_w, tile_h };
 
 
-        //update each corner manager independently
+        // Update each corner manager independently (but don't advance if frozen)
         for (int i = 0; i < 4; i++) {
-            tile_manager_update(&tm[i], dt);
+            if (!tm[i].frozen) {
+                tile_manager_update(&tm[i], dt);
+            }
         }
 
-        //best-effort uniqueness enforcement:
-        //if 2 corners land on the same tile index at the same time, nudge later ones forward.
-        //(this keeps "at most one tile type on screen" when you have enough plugins)
+        // Best-effort uniqueness enforcement:
+        // IMPORTANT: never modify a frozen corner's current tile.
         for (int i = 0; i < 4; i++) {
+            if (tm[i].frozen) continue;
             if (tm[i].count <= 1) continue;
+
             for (int j = 0; j < i; j++) {
+                if (tm[j].count <= 0) continue;
+
+                // If another corner is frozen on some tile, don't collide with it.
+                // If both are unfrozen, still avoid collisions.
                 if (tm[i].count == tm[j].count && tm[i].current == tm[j].current) {
                     tm[i].current = (tm[i].current + 1) % tm[i].count;
-                    tm[i].t_in_tile = 0.0; //reset timer so it doesn't instantly flip again
+                    tm[i].t_in_tile = 0.0;
                 }
             }
         }
@@ -1119,6 +1177,9 @@ int main(int argc, char **argv) {
                 w / 2, footer_y + foot_h / 2);
         }
 
+        //update videos
+        media_system_update(media, dt);
+
         //present the frame
         SDL_RenderPresent(r);
     }
@@ -1136,6 +1197,7 @@ int main(int argc, char **argv) {
     TTF_CloseFont(font_footer);
 
     SDL_DestroyTexture(bgTex);
+    media_system_destroy(media);
     SDL_DestroyRenderer(r);
     SDL_DestroyWindow(win);
 
