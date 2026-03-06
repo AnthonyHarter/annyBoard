@@ -8,6 +8,10 @@ REQUIRED_PACKAGES=(
     libsdl2-ttf-dev
     libsdl2-image-dev
     libcurl4-openssl-dev
+    libavformat-dev 
+    libavcodec-dev
+    libavutil-dev
+    libswscale-dev
 )
 
 echo "checking dependencies..."
