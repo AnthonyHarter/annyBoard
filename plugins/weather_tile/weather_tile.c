@@ -1,111 +1,223 @@
 #include "../../tile_api.h"
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+#include <curl/curl.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 /*
-compile
 
-gcc -fPIC -shared -o plugins/image_tile/image_tile.so   plugins/image_tile/image_tile.c   `sdl2-config --cflags --libs` -lSDL2_ttf -lSDL2_image -lm
+compile commmand:
+gcc -fPIC -shared -o plugins/plugin3/plugin3.so \
+  plugins/plugin3/plugin3.c \
+  `sdl2-config --cflags --libs` -lSDL2_ttf -lSDL2_image -lm
 
 */
 
 typedef struct {
-    TileContext *ctx;
-    char plugin_dir[512];
-    void *img;
+    TileContext *ctx; //borrowed
+    char plugin_dir[512]; //where state.json lives
+    int prime;
+    char last_date[16]; //"YYYY-MM-DD"
+
+    int a; //random element in {1..p-1} for current display
+    int inv; //inverse of a mod p
+    int has_choice;
+
+    SDL_Texture *t1; int t1w, t1h;
+    SDL_Texture *t2; int t2w, t2h;
+    SDL_Texture *t3; int t3w, t3h;
+    SDL_Texture *t4; int t4w, t4h;
 } State;
 
-static const char* tile_name(void) { return "Image Tile"; }
+typedef struct {
+    char description[128];
+    float temp;
+    float feels_like;
+    int pressure;
+    int humidity;
+    float wind_speed;
 
-//This is just the function to load the image
-static void open_image(State *s) {
-    if (!s || s[0].img) return;
+} Weather;
 
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/image.png", s[0].plugin_dir);
 
-    if (s[0].ctx[0].media && s[0].ctx[0].media[0].image_load) {
-        fprintf(stderr, "Image Tile: loading %s\n", path);
-        s[0].img = s[0].ctx[0].media[0].image_load(s[0].ctx, path);
-        fprintf(stderr, "Image Tile: image_load returned %p\n", s[0].img);
-        if (!s[0].img) fprintf(stderr, "Image Tile: failed to load %s\n", path);
+//This is important, it makes our char*s into textures
+static SDL_Texture* make_text(SDL_Renderer *r, TTF_Font *font,
+                              const char *msg, int *w, int *h) {
+    SDL_Color white = {255,255,255,255};
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, msg, white);
+    if (!surf) return NULL;
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+    *w = surf[0].w; *h = surf[0].h;
+    SDL_FreeSurface(surf);
+    return tex;
+}
+
+//Free textures
+static void free_texts(State *s) {
+    if (s[0].t1) SDL_DestroyTexture(s[0].t1);
+    if (s[0].t2) SDL_DestroyTexture(s[0].t2);
+    if (s[0].t3) SDL_DestroyTexture(s[0].t3);
+    if (s[0].t4) SDL_DestroyTexture(s[0].t4);
+    s[0].t1=s[0].t2=s[0].t3=s[0].t4=NULL;
+}
+
+static Weather* get_weather(State *s) {
+    Weather *w = malloc(sizeof(Weather));
+    w->feels_like = 0.0;
+    w->humidity = 0;
+    w->pressure = 0;
+    w->temp = 0;
+    w->wind_speed = 0.0;
+    strcpy(w->description, "");
+
+    FILE *apiptr;
+    char api_key_path[1024];
+    snprintf(api_key_path, sizeof(api_key_path), "%s/api-key.txt", s[0].plugin_dir);
+    apiptr = fopen(api_key_path, "r");
+
+    if (apiptr != NULL) {
+        fprintf(stderr, "Weather Tile: API key sucessfully loaded!\n");
+        char api_key[128];
+        fgets(api_key, 128, apiptr);
+
+        FILE *propsptr;
+        char props_path[1024];
+        snprintf(props_path, sizeof(props_path), "%s/weather.properties", s[0].plugin_dir);
+        propsptr = fopen(props_path, "r");
+
+        if (propsptr != NULL) {
+            CURL *curl = curl_easy_init();
+            if(curl) {
+                CURLcode result;
+                char api_url[1024];
+
+                // not sure how many properties i'll end up adding, assume a lot, don't buffer anything for funsies :)
+
+                char *props = malloc(sizeof(char) * 8192);
+
+                fgets(props, 8192, propsptr);
+
+                float lat;
+                float lon;
+
+                char *line = strtok(props, "\n");
+                while (line != NULL) {
+                    // TODO: make this not a hellish if-else
+
+                }
+
+                free(props);
+
+                snprintf(api_url, 1024, "https://api.openweathermap.org/data/2.5/weather?lat=%0.1f&lon=%0.1f&appid=%s", lat, lon, api_key);
+                curl_easy_setopt(curl, CURLOPT_URL, api_url);
+            }
+            fclose(propsptr);
+        }
+        fclose(apiptr);
     } else {
-        fprintf(stderr, "Image Tile: media API missing (ctx[0].media=%p)\n", (void*)s[0].ctx[0].media);
+        fprintf(stderr, "Weather Tile: Unable to open weather API key file.\n");
     }
-}
-//and this is the one to close it
-static void close_image(State *s) {
-    if (!s || !s[0].img) return;
 
-    if (s[0].ctx[0].media && s[0].ctx[0].media[0].image_free) {
-        s[0].ctx[0].media[0].image_free(s[0].ctx, s[0].img);
-    }
-    s[0].img = NULL;
+
+    return w;
 }
 
-//we init our tile
+//Rebuild on reload
+static void rebuild_texts(State *s) {
+    free_texts(s);
+
+    SDL_Renderer *r = s[0].ctx[0].renderer;
+
+    char line1[128];
+    char line2[128];
+    char line3[128];
+    char line4[128];
+
+    Weather *w = get_weather(s);
+
+    // TODO: respect units in the config
+
+    snprintf(line1, sizeof(line1), "Weather | %s", w->description);
+    snprintf(line2, sizeof(line2), "%0.1f°F | Feels like: %0.1f°F", w->temp, w->feels_like);
+    snprintf(line3, sizeof(line3), "%dmBar | %d%% Humidity", w->pressure, w->humidity);
+    snprintf(line4, sizeof(line4), "%0.1fmph wind", w->wind_speed);
+
+    free(w);
+
+
+    s[0].t1 = make_text(r, s[0].ctx[0].font_medium, line1, &s[0].t1w, &s[0].t1h);
+    s[0].t2 = make_text(r, s[0].ctx[0].font_small,  line2, &s[0].t2w, &s[0].t2h);
+    s[0].t3 = make_text(r, s[0].ctx[0].font_small,  line3, &s[0].t3w, &s[0].t3h);
+    s[0].t4 = make_text(r, s[0].ctx[0].font_small,  line4, &s[0].t4w, &s[0].t4h);
+}
+
+static const char* tile_name(void) { return "Weather"; }
+
 static void* tile_create(TileContext *ctx, const char *plugin_dir) {
     State *s = (State*)SDL_calloc(1, sizeof(State));
     s[0].ctx = ctx;
-    strncpy(s[0].plugin_dir, plugin_dir, sizeof(s[0].plugin_dir) - 1);
-    s[0].img = NULL;
+    strncpy(s[0].plugin_dir, plugin_dir, sizeof(s[0].plugin_dir)-1);
+
+
+
+    s[0].has_choice = 0;
+    rebuild_texts(s);
     return s;
 }
 
-//freeing tile
-static void tile_destroy(void *st) {
-    State *s = (State*)st;
-    if (!s) return;
-    close_image(s);
+static void tile_destroy(void *state) {
+    State *s = (State*)state;
+    free_texts(s);
     SDL_free(s);
 }
 
-//this is the function that is run when it's our turn to display
-static void tile_on_show(void *st) {
-    State *s = (State*)st;
-    open_image(s);
-}
-
-//this is run when we are done displaying
-static void tile_on_hide(void *st) {
-    State *s = (State*)st;
-    close_image(s);
-}
-
-//this is a required function that we don't use
-static void tile_update(void *st, double dt) {
-    (void)st;
+static void tile_update(void *state, double dt) {
     (void)dt;
-    /* nothing to update */
+    //Nothing time-animated in this tile right now.
 }
 
-//here's how we actually display the image
-static void tile_render(void *st, SDL_Renderer *r, const SDL_Rect *rect) {
-    State *s = (State*)st;
 
+static void tile_render(void *state, SDL_Renderer *r, const SDL_Rect *rect) {
+    State *s = (State*)state;
 
-    //as long as everything exists, draw it
-    if (!s || !s[0].img || !s[0].ctx[0].media || !s[0].ctx[0].media[0].image_draw) return;
-    s[0].ctx[0].media[0].image_draw(s[0].ctx, s[0].img, r, rect, /*keep_aspect=*/1, /*cover=*/0);
+    //use a soft panel background so its distinguished from the main background
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 70);
+    SDL_RenderFillRect(r, rect);
+
+    //thin border
+    SDL_SetRenderDrawColor(r, 255, 255, 255, 90);
+    SDL_RenderDrawRect(r, rect);
+
+    //simple layout
+    int pad = rect[0].w / 18;
+    int x = rect[0].x + pad;
+    int y = rect[0].y + pad;
+
+    if (s[0].t1) { SDL_Rect d = {x, y, s[0].t1w, s[0].t1h}; SDL_RenderCopy(r, s[0].t1, NULL, &d); y += s[0].t1h + pad/2; }
+    if (s[0].t2) { SDL_Rect d = {x, y, s[0].t2w, s[0].t2h}; SDL_RenderCopy(r, s[0].t2, NULL, &d); y += s[0].t2h + pad/3; }
+    if (s[0].t3) { SDL_Rect d = {x, y, s[0].t3w, s[0].t3h}; SDL_RenderCopy(r, s[0].t3, NULL, &d); y += s[0].t3h + pad/3; }
+    if (s[0].t4) { SDL_Rect d = {x, y, s[0].t4w, s[0].t4h}; SDL_RenderCopy(r, s[0].t4, NULL, &d); }
 }
 
-//requested duration of 10 seconds
-static double tile_duration(void) { return 10.0; }
+//8 seconds is plenty long
+static double tile_pref_duration(void) { return 8.0; }
 
-//here's the struct we're actually going to pass through
-//we just pass through our functions that we made
-static const Tile TILE = {
+//here's the thing we care about
+static Tile TILE = {
     .api_version = TILE_API_VERSION,
     .name = tile_name,
-    .create = tile_create, 
+    .create = tile_create,
     .destroy = tile_destroy,
     .update = tile_update,
-    .on_show = tile_on_show,
-    .on_hide = tile_on_hide,
     .render = tile_render,
-    .preferred_duration = tile_duration
+    .preferred_duration = tile_pref_duration,
+    .on_hide = NULL
 };
 
-__attribute__((visibility("default")))
+//give the tile to the main thing
 const Tile* tile_get(void) { return &TILE; }
