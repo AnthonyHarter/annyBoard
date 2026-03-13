@@ -47,8 +47,8 @@
 #define FONT_PATH "assets/font.ttf"
 
 //these are the bakcground texture resolutions
-#define BG_TEX_W 640
-#define BG_TEX_H 360
+#define BG_TEX_W 128
+#define BG_TEX_H 72
 
 //hehehehehehe 100000000000 tiles go brrrrrrrrrrrrrrrr silly pi DEFINITELY has memory for 1000000000 tiles!
 #define MAX_TILES     128
